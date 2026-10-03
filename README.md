@@ -19,18 +19,31 @@ Rust edition：`2024`
 ```
 axum-tutorial/
 ├── src/
-│   ├── main.rs      # 程序入口：绑定 127.0.0.1:8080 并启动服务，含进程内单元测试
-│   └── lib.rs       # app() 构建路由，定义 /hello 与 /hello2 两个 Handler
+│   ├── main.rs          # 程序入口：绑定 127.0.0.1:8080 并启动服务，含进程内单元测试
+│   ├── lib.rs           # app() 组装路由，挂载 AppState 与 fallback
+│   ├── state.rs         # AppState（Arc<RwLock<HashMap<Uuid, User>>> 内存数据库）
+│   ├── errors.rs        # AppError 统一错误类型，实现 IntoResponse
+│   ├── handler/         # 各资源的 Handler（hello、user、404 fallback）
+│   └── router/          # 各资源的路由（hello_router、user_router），api_router() 汇总
 └── tests/
-    └── e2e_test.rs  # 端到端测试：随机端口起真实服务，用 reqwest 发请求
+    └── e2e_test.rs      # 端到端测试：随机端口起真实服务，用 reqwest 发请求
 ```
 
 ## API 路由
 
-| 方法 | 路径 | 响应 | 说明 |
-| --- | --- | --- | --- |
-| GET | `/hello` | `<h1>Hello, World!</h1>` | 闭包形式的内联 Handler |
-| GET | `/hello2` | `Hello <strong>World!</strong>` | 独立 async 函数 Handler |
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/hello` | 闭包 Handler，返回 HTML |
+| GET | `/hello1` | Query 参数（`?name=Tom`，缺省为 World） |
+| GET | `/hello2/{name}` | Path 路径参数 |
+| GET | `/hello-q?name=Tom` | Query + JSON 结构化响应 |
+| GET | `/users` | 列出所有用户 |
+| POST | `/users` | 创建用户（JSON body：`name`、`email`） |
+| GET | `/users/{id}` | 查询单个用户，不存在返回 404 |
+| PUT | `/users/{id}` | 部分更新（`name` / `email` 均为可选字段） |
+| DELETE | `/users/{id}` | 删除用户，成功返回 204 |
+
+未匹配的路径走 `fallback`，返回 404 JSON：`{"error":"route not found"}`。
 
 ## 快速开始
 
@@ -98,18 +111,85 @@ cargo watch -c -q -w src -x run
 
 ## 测试
 
-项目包含两种测试方式，均不占用固定端口：
+### 测试策略总览
+
+项目采用两种互补的测试方式，均不占用固定端口，可放心并行运行：
+
+| | 进程内测试（单元测试） | e2e 测试（端到端测试） |
+| --- | --- | --- |
+| 位置 | `src/main.rs` 的 `#[cfg(test)] mod tests` | `tests/e2e_test.rs` |
+| 原理 | `Router` 本身是 `tower::Service`，用 `oneshot` 在内存中直接塞入 `Request`，不 bind socket | `TcpListener::bind("127.0.0.1:0")` 随机端口启动真实服务，用 reqwest 发起真实 HTTP 请求 |
+| 速度 | 毫秒级 | 较慢（走完整网络栈） |
+| 覆盖 | Handler 逻辑、路由匹配、状态码、响应体 | 序列化、真实的请求/响应管线 |
+| 依赖 | `tower`（`ServiceExt::oneshot`） | `reqwest`、`anyhow` |
+
+### 测试用例清单
+
+| 测试 | 文件 | 验证内容 |
+| --- | --- | --- |
+| `hello_world` | `src/main.rs` | GET `/hello` 返回 200，body 为 `<h1>Hello, World!</h1>`；演示 `into_parts` + `to_bytes` 读取流式 body |
+| `not_found` | `src/main.rs` | 未知路径 `/nope` 返回 404 |
+| `real_request` | `tests/e2e_test.rs` | 随机端口起服务，GET `/hello` 返回 200 且 body 正确 |
+
+### 运行命令
 
 ```bash
 # 运行全部测试（单元 + e2e）
 cargo test
 
-# 仅运行进程内单元测试（src/main.rs 中，通过 tower oneshot 直接调用 Router，不 bind socket）
+# 按测试名过滤（匹配测试函数名的任意子串）
 cargo test hello_world
+cargo test not_found
 
-# 仅运行 e2e 测试（随机端口启动真实服务，用 reqwest 发起真实 HTTP 请求）
-cargo test --test e2e_test
+# 只运行某个测试目标
+cargo test --lib              # 仅 src 内的单元测试
+cargo test --test e2e_test     # 仅 tests/e2e_test.rs
+cargo test --bin axum_tutorial # 仅 main.rs 内的单元测试
+
+# 显示测试中 println! 的输出（默认成功时不显示）
+cargo test -- --nocapture
+
+# 修改后强制全量重跑（Rust 测试二进制默认不重新编译未变更目标）
+cargo test --no-run --quiet && cargo test
 ```
 
-- **进程内测试**：`Router` 本身就是 `tower::Service`，可用 `oneshot` 直接在内存中塞入 `Request`，毫秒级完成、无端口冲突。
-- **e2e 测试**：`TcpListener::bind("127.0.0.1:0")` 由系统随机分配端口，测试并行运行不会出现 "Address already in use"；使用 `#[tokio::test(flavor = "multi_thread")]` 以支持后台 server task。
+### 实现要点说明
+
+**进程内测试（oneshot）**：
+
+```rust
+use tower::ServiceExt; // 引入 oneshot 扩展方法
+
+let response = app()
+    .oneshot(
+        Request::builder()
+            .uri("/hello")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+```
+
+- `Router` 实现了 `tower::Service`，`oneshot` 让 `Service` 只处理一次请求，全程零 socket。
+- 读取响应体需要三步：`into_parts()` 拿到 body 所有权 → `to_bytes(body, usize::MAX)` 把流式 body 全部读出 → 转 `String` 断言。
+
+**e2e 测试（随机端口 + 后台 task）**：
+
+```rust
+let listener = TcpListener::bind("127.0.0.1:0").await.unwrap(); // 端口写 0：系统随机分配
+let addr = listener.local_addr().unwrap();
+tokio::spawn(async move {
+    axum::serve(listener, app()).await.unwrap();
+});
+```
+
+- 端口 `0` 表示由系统随机分配，测试并行跑不会 "Address already in use"。
+- 服务通过 `tokio::spawn` 在后台 task 中运行，因此测试需标注 `#[tokio::test(flavor = "multi_thread")]`，多线程 runtime 下更稳。
+- 测试函数返回 `anyhow::Result<()>`，断言链路中可直接用 `?`。
+
+### 如何新增测试
+
+- **Handler 逻辑测试**：优先写进程内测试，在 `src/main.rs`（或专门的 `#[cfg(test)]` 模块）中用 `oneshot` 构造 `Request`，断言状态码与 body。
+- **接口级测试**：在 `tests/e2e_test.rs` 中复用 `spawn_server()`，用 reqwest 调用真实端口。例如为 user CRUD 新增 e2e 测试时，依次 POST → GET → PUT → DELETE 并断言各状态码（201 / 200 / 204 / 404）。
+- **注意**：`AppState` 目前每次 `app()` 都新建（内存数据库为空），如需带初始数据的测试，可改造 `app()` 接收自定义 state。
