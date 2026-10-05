@@ -1,7 +1,7 @@
 use axum::{
     Router,
     extract::Request,
-    http::{HeaderValue, header, Response},
+    http::{HeaderValue, Response, header},
     response::IntoResponse,
     routing::get_service,
 };
@@ -15,12 +15,14 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::{docs::ApiDoc, handler::not_found::not_found, state::AppState};
 
+pub mod auth_router;
 pub mod hello_router;
 pub mod user_router;
 
 pub fn api_router() -> Router<AppState> {
     Router::<AppState>::new()
         .merge(hello_router::router()) // Router<()> 可并入任意 Router<S>
+        .merge(auth_router::router())
         .nest("/users", user_router::routes())
         // 四种 API 文档 UI，共用同一份 ApiDoc：
         // Swagger UI: /swagger-ui，OpenAPI JSON: /api-docs/openapi.json
@@ -54,10 +56,12 @@ fn utf8_charset<B>(mut res: Response<B>) -> Response<B> {
 }
 
 pub fn static_router() -> Router<AppState> {
-    Router::<AppState>::new().fallback_service(get_service(
-        ServeDir::new("./").not_found_service(tower::service_fn(|_req: Request| async {
-            Ok::<_, std::convert::Infallible>(not_found().await.into_response())
-        })),
+    Router::<AppState>::new().fallback_service(
+        get_service(ServeDir::new("./").not_found_service(tower::service_fn(
+            |_req: Request| async {
+                Ok::<_, std::convert::Infallible>(not_found().await.into_response())
+            },
+        )))
+        .layer(MapResponseLayer::new(utf8_charset)),
     )
-    .layer(MapResponseLayer::new(utf8_charset)))
 }

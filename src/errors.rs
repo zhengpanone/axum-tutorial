@@ -3,7 +3,10 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde_json::json;
 
+pub type Result<T> = core::result::Result<T, AppError>;
+
 pub enum AppError {
+    // LoginFail(String),
     BadRequest(String),
     NotFound(String),
     Internal(String),

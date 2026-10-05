@@ -1,0 +1,12 @@
+
+@baseUrl=http://127.0.0.1:8080
+
+### 创建租户
+POST {{baseUrl}}/login
+Content-Type: application/json
+
+{
+  "username": "admin",
+  "password": "admin
+  "
+}

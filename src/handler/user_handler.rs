@@ -92,10 +92,7 @@ pub async fn create_user(
         (status = 404, description = "用户不存在")
     )
 )]
-pub async fn get_user(
-    State(db): State<Db>,
-    Path(id): Path<Uuid>,
-) -> Result<Json<User>, AppError> {
+pub async fn get_user(State(db): State<Db>, Path(id): Path<Uuid>) -> Result<Json<User>, AppError> {
     println!("->> {:<12} - get_user {id}", "HANDLER");
     let user = db
         .read()
