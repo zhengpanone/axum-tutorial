@@ -8,6 +8,13 @@
 | --- | --- | --- |
 | axum | 0.8 | Web 框架 |
 | tokio | 1.53（`full` features） | 异步运行时 |
+| serde / serde_json | 1.0 | 序列化与反序列化 |
+| uuid | 1.27（`serde`、`v4` features） | 用户 ID 生成与序列化 |
+| utoipa | 5 | OpenAPI 注解与文档生成 |
+| utoipa-swagger-ui | 9（`axum` feature） | Swagger UI 文档页面 |
+| utoipa-redoc | 6（`axum` feature） | Redoc 阅读式文档页面 |
+| utoipa-rapidoc | 6（`axum` feature） | RapiDoc 文档页面 |
+| utoipa-scalar | 0.3（`axum` feature） | Scalar 文档页面 |
 | reqwest（dev） | 0.13（`json` features） | e2e 测试用 HTTP 客户端 |
 | tower（dev） | 0.5（`util` features） | 提供 `oneshot` 进程内测试能力 |
 | anyhow（dev） | 1.0 | 测试中的错误处理 |
@@ -21,10 +28,11 @@ axum-tutorial/
 ├── src/
 │   ├── main.rs          # 程序入口：绑定 127.0.0.1:8080 并启动服务，含进程内单元测试
 │   ├── lib.rs           # app() 组装路由，挂载 AppState 与 fallback
+│   ├── docs.rs          # OpenAPI 文档定义（utoipa 从 Handler 注解收集）
 │   ├── state.rs         # AppState（Arc<RwLock<HashMap<Uuid, User>>> 内存数据库）
 │   ├── errors.rs        # AppError 统一错误类型，实现 IntoResponse
 │   ├── handler/         # 各资源的 Handler（hello、user、404 fallback）
-│   └── router/          # 各资源的路由（hello_router、user_router），api_router() 汇总
+│   └── router/          # 各资源的路由（hello_router、user_router），api_router() 汇总并挂载 SwaggerUi
 └── tests/
     └── e2e_test.rs      # 端到端测试：随机端口起真实服务，用 reqwest 发请求
 ```
@@ -45,6 +53,79 @@ axum-tutorial/
 
 未匹配的路径走 `fallback`，返回 404 JSON：`{"error":"route not found"}`。
 
+## Swagger / OpenAPI 文档
+
+项目使用 [utoipa](https://github.com/juhaku/utoipa) 生态自动生成并托管 API 文档。utoipa 官方提供了四种 UI 渲染器，本项目全部接入，共用同一份 `ApiDoc`，按喜好任选：
+
+| 地址 | UI | 特点 |
+| --- | --- | --- |
+| `http://127.0.0.1:8080/swagger-ui` | Swagger UI | 最经典，调试功能全（Try it out、Schema 折叠） |
+| `http://127.0.0.1:8080/redoc` | Redoc | 三栏阅读式排版，适合对外发布静态文档 |
+| `http://127.0.0.1:8080/scalar` | Scalar | 现代美观，交互体验好 |
+| `http://127.0.0.1:8080/rapidoc` | RapiDoc | 轻量快速，支持 Try it out |
+| `http://127.0.0.1:8080/api-docs/openapi.json` | OpenAPI JSON | 原始规范文件，可导入 Postman / Apifox 等 |
+
+对应 crate（注意版本需与 utoipa 主版本配对，当前 utoipa 5 对应下述版本）：
+
+| crate | 版本 | 挂载方式 |
+| --- | --- | --- |
+| `utoipa-swagger-ui` | 9 | `SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", spec)` |
+| `utoipa-redoc` | 6 | `Redoc::with_url("/redoc", spec)` |
+| `utoipa-scalar` | 0.3 | `Scalar::with_url("/scalar", spec)` |
+| `utoipa-rapidoc` | 6 | `RapiDoc::new("/api-docs/openapi.json").path("/rapidoc")` |
+
+### 实现方式
+
+1. **Handler 注解**：每个 Handler 上方用 `#[utoipa::path(...)]` 声明方法、路径、参数、请求体与响应：
+
+```rust
+#[utoipa::path(
+    get,
+    path = "/users/{id}",
+    tag = "users",
+    params(("id" = Uuid, Path, description = "用户 ID")),
+    responses(
+        (status = 200, description = "用户详情", body = User),
+        (status = 404, description = "用户不存在")
+    )
+)]
+pub async fn get_user(...) -> ... { ... }
+```
+
+2. **Schema 注解**：请求/响应结构体派生 `ToSchema`（查询参数用 `IntoParams`）：
+
+```rust
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateUser {
+    pub name: String,
+    pub email: String,
+}
+```
+
+3. **汇总生成**（`src/docs.rs`）：`ApiDoc` 通过 `#[derive(OpenApi)]` 收集所有 path 与 schema，在 `router/mod.rs` 挂载：
+
+```rust
+Router::<AppState>::new()
+    .merge(hello_router::router())
+    .nest("/users", user_router::routes())
+    // 四种 UI 共用同一份 ApiDoc
+    .merge(SwaggerUi::new("/swagger-ui")
+        .url("/api-docs/openapi.json", ApiDoc::openapi()))
+    .merge(Redoc::with_url("/redoc", ApiDoc::openapi()))
+    .merge(Scalar::with_url("/scalar", ApiDoc::openapi()))
+    .merge(RapiDoc::new("/api-docs/openapi.json").path("/rapidoc"))
+```
+
+> 注意：RapiDoc 要用 `new`（只引用 spec 地址）而不是 `with_openapi`（会自己注册 `/api-docs/openapi.json` 路由），否则与 SwaggerUi 的注册重叠，启动时 panic："Overlapping method route"。
+
+### 新增接口时的操作
+
+1. 新 Handler 加上 `#[utoipa::path(...)]` 注解（记得写 `tag`）；
+2. 新增/变更的结构体派生 `ToSchema`；
+3. 在 `src/docs.rs` 的 `paths(...)` / `components(schemas(...))` 中登记。
+
+> 注意：忘记登记 `docs.rs` 时编译不会报错，但 Swagger 页面上看不到该接口。
+
 ## 快速开始
 
 ```bash
@@ -55,6 +136,14 @@ cargo run
 curl http://127.0.0.1:8080/hello
 curl http://127.0.0.1:8080/hello2
 ```
+
+启动后可在浏览器打开 API 文档页面（四种 UI 共用同一份文档，任选其一）：
+
+- Swagger UI：<http://127.0.0.1:8080/swagger-ui>
+- Redoc：<http://127.0.0.1:8080/redoc>
+- Scalar：<http://127.0.0.1:8080/scalar>
+- RapiDoc：<http://127.0.0.1:8080/rapidoc>
+- OpenAPI JSON（可导入 Postman / Apifox）：<http://127.0.0.1:8080/api-docs/openapi.json>
 
 ## cargo watch 热重载开发
 

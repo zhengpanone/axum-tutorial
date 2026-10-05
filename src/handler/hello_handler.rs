@@ -5,13 +5,25 @@ use axum::{
     response::{Html, IntoResponse},
 };
 use serde::{Deserialize, Serialize};
+use utoipa::{IntoParams, ToSchema};
 
 #[derive(Debug, Deserialize)]
 pub struct HelloParams {
     name: Option<String>,
 }
 
-/// GET /hello1
+/// Hello, Query 参数
+#[utoipa::path(
+    get,
+    path = "/hello1",
+    tag = "hello",
+    params(
+        ("name" = Option<String>, Query, description = "名字，缺省为 World")
+    ),
+    responses(
+        (status = 200, description = "返回 HTML 问候页面")
+    )
+)]
 pub async fn hello1(Query(params): Query<HelloParams>) -> impl IntoResponse {
     println!("->> {:<12} - handler_hello 左对齐", "HANDLER"); // 左对齐
     println!("->> {:>12} - handler_hello 右对齐", "HANDLER"); // 右对齐
@@ -21,23 +33,44 @@ pub async fn hello1(Query(params): Query<HelloParams>) -> impl IntoResponse {
     Html(format!("Hello <strong>{name}!</strong>"))
 }
 
-/// GET /hello2
+/// Hello, Path 参数
+#[utoipa::path(
+    get,
+    path = "/hello2/{name}",
+    tag = "hello",
+    params(
+        ("name" = String, Path, description = "名字")
+    ),
+    responses(
+        (status = 200, description = "返回 HTML 问候页面")
+    )
+)]
 pub async fn hello2(Path(name): Path<String>) -> impl IntoResponse {
     Html(format!("Hello <strong>{name}!</strong>"))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct HelloResp {
     pub message: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
 pub struct HelloQuery {
     /// 缺省时不报错，直接为 None
     #[serde(default)]
     pub name: Option<String>,
 }
-/// GET /hello-q?name=Tom
+
+/// Hello, JSON 响应
+#[utoipa::path(
+    get,
+    path = "/hello-q",
+    tag = "hello",
+    params(HelloQuery),
+    responses(
+        (status = 200, description = "JSON 问候", body = HelloResp)
+    )
+)]
 pub async fn hello_query(Query(q): Query<HelloQuery>) -> impl IntoResponse {
     let name = q.name.unwrap_or_else(|| "World".to_string());
     (

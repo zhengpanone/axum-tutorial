@@ -5,6 +5,7 @@ pub mod errors;
 pub mod handler;
 pub mod router;
 pub mod state;
+pub mod docs;
 
 pub fn app() -> Router {
     router::api_router()
